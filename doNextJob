@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")"
+
+LOGS_DIR="logs"
+mkdir -p "$LOGS_DIR"
+
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+LOG_FILE="$LOGS_DIR/$TIMESTAMP.log"
+
+PROMPT="Check leftclaw for open research jobs (Service Type 7 ONLY — ignore all other types). \
+If there is one, follow your workflow exactly: accept the job, read the description and messages, \
+do thorough research using deep_fetch and other tools, write a comprehensive report, \
+upload it to BGIPFS with bgipfs_upload, then call leftclaw_log_work and leftclaw_complete_job to finish. \
+If there are no research jobs, say so and stop."
+
+echo "=== LeftClaw Researcher — $TIMESTAMP ===" | tee "$LOG_FILE"
+echo "Log: $LOG_FILE" | tee -a "$LOG_FILE"
+echo "---" | tee -a "$LOG_FILE"
+
+python3 run.py "$PROMPT" 2>&1 | tee -a "$LOG_FILE"
+
+echo "" | tee -a "$LOG_FILE"
+echo "=== Done ===" | tee -a "$LOG_FILE"
