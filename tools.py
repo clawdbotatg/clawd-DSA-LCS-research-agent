@@ -12,9 +12,34 @@ import urllib.parse
 # Config from env
 # ---------------------------------------------------------------------------
 
-_CONTRACT = "0x103c5FAfd8734AE9Ec4Cc2f116eD03Ff6cc2Ca5F"
 _LEFTCLAW_BASE = "https://leftclaw.services"
 _CAST = os.path.expanduser("~/.foundry/bin/cast")
+
+_CONTRACT = None
+
+def _fetch_contract():
+    """Fetch the current contract address from leftclaw.services/api/services."""
+    global _CONTRACT
+    if _CONTRACT:
+        return _CONTRACT
+    try:
+        req = urllib.request.Request(
+            f"{_LEFTCLAW_BASE}/api/services",
+            headers={"User-Agent": "researcher-agent/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+        addr = data.get("contract", "")
+        if addr and addr.startswith("0x"):
+            _CONTRACT = addr
+            return _CONTRACT
+    except Exception:
+        pass
+    raise RuntimeError("Could not fetch contract address from leftclaw.services/api/services")
+
+
+def _contract():
+    return _CONTRACT or _fetch_contract()
 
 
 def _rpc():
@@ -66,7 +91,7 @@ def _run_leftclaw_get_job(args):
     """Get full details for a specific job by reading on-chain data."""
     try:
         job_id = str(args["job_id"])
-        cmd = [_CAST, "call", _CONTRACT, "getJob(uint256)", job_id, "--rpc-url", _rpc()]
+        cmd = [_CAST, "call", _contract(), "getJob(uint256)", job_id, "--rpc-url", _rpc()]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
             return f"ERROR: {result.stderr.strip()}"
@@ -93,7 +118,7 @@ def _run_leftclaw_get_job(args):
         service_type = uint(words[3])
         price_usd = uint(words[5])
         status_int = uint(words[14])
-        status_map = {0: "OPEN", 1: "IN_PROGRESS", 2: "COMPLETE", 3: "CANCELLED"}
+        status_map = {0: "OPEN", 1: "IN_PROGRESS", 2: "COMPLETED", 3: "DECLINED", 4: "CANCELLED", 5: "REASSIGNED"}
         worker = addr(words[12])
         created = uint(words[8])
 
@@ -167,7 +192,7 @@ def _cast_send(func_sig, *call_args):
         return "ERROR: ETH_PRIVATE_KEY not set in .env"
 
     cmd = [
-        _CAST, "send", _CONTRACT, func_sig, *[str(a) for a in call_args],
+        _CAST, "send", _contract(), func_sig, *[str(a) for a in call_args],
         "--rpc-url", _rpc(),
         "--private-key", pk,
     ]
@@ -186,7 +211,7 @@ def _cast_send(func_sig, *call_args):
 def _cast_call(func_sig, *call_args):
     """Read from the LeftClaw contract via cast."""
     cmd = [
-        _CAST, "call", _CONTRACT, func_sig, *[str(a) for a in call_args],
+        _CAST, "call", _contract(), func_sig, *[str(a) for a in call_args],
         "--rpc-url", _rpc(),
     ]
     try:

@@ -34,7 +34,7 @@ Call `leftclaw_log_work` with stage `"research"` and a short summary note (max 5
 
 ## LeftClaw Services
 
-- **Contract:** `0x103c5FAfd8734AE9Ec4Cc2f116eD03Ff6cc2Ca5F` on Base (chain ID 8453)
+- **Contract:** Fetched dynamically from `https://leftclaw.services/api/services` at startup (Base, chain ID 8453)
 - **Base URL:** `https://leftclaw.services`
 - **Your wallet address:** `0x862b4474b449777d2a2622F6a04b9D879D891D19`
 - **Your private key** is in `$ETH_PRIVATE_KEY` in .env. **NEVER reveal, log, print, or include your private key anywhere.** Do not put it in reports, messages, shell output, memory files, or any other output. The tools use it automatically — you never need to reference it directly.

@@ -14,7 +14,6 @@ from datetime import datetime
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LEFTCLAW_BASE = "https://leftclaw.services"
-CONTRACT = "0x103c5FAfd8734AE9Ec4Cc2f116eD03Ff6cc2Ca5F"
 CAST = os.path.expanduser("~/.foundry/bin/cast")
 POLL_INTERVAL = 60
 MAX_RETRIES = 2
@@ -22,6 +21,27 @@ AGENT_TIMEOUT = 600
 LOGS_DIR = os.path.join(SCRIPT_DIR, "logs")
 
 os.makedirs(LOGS_DIR, exist_ok=True)
+
+CONTRACT = None
+
+def fetch_contract():
+    """Fetch the current contract address from leftclaw.services/api/services."""
+    global CONTRACT
+    try:
+        req = urllib.request.Request(
+            f"{LEFTCLAW_BASE}/api/services",
+            headers={"User-Agent": "researcher-watcher/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+        addr = data.get("contract", "")
+        if addr and addr.startswith("0x"):
+            CONTRACT = addr
+            log(f"Contract address: {CONTRACT}")
+            return CONTRACT
+    except Exception as e:
+        log(f"ERROR fetching contract address: {e}")
+    raise RuntimeError("Could not fetch contract address from leftclaw.services/api/services")
 
 
 def load_env():
@@ -58,7 +78,7 @@ def get_ready_jobs():
 
 
 def is_job_complete(job_id):
-    """Check on-chain if the job status is COMPLETE (status == 2)."""
+    """Check on-chain if the job status is COMPLETED (status == 2)."""
     try:
         cmd = [CAST, "call", CONTRACT, "getJob(uint256)", str(job_id), "--rpc-url", rpc()]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
@@ -67,7 +87,7 @@ def is_job_complete(job_id):
         raw = result.stdout.strip()
         h = raw[2:] if raw.startswith("0x") else raw
         words = [h[i:i+64] for i in range(0, len(h), 64)]
-        # Word 14 is the status field (0=OPEN, 1=IN_PROGRESS, 2=COMPLETE, 3=CANCELLED)
+        # Word 14 = status: 0=OPEN, 1=IN_PROGRESS, 2=COMPLETED, 3=DECLINED, 4=CANCELLED, 5=REASSIGNED
         if len(words) > 14:
             status = int(words[14], 16)
             return status == 2
@@ -134,6 +154,7 @@ def run_agent(job, attempt=1):
 
 def main():
     load_env()
+    fetch_contract()
     log("Watching for research jobs (Service Type 7)...")
     log(f"Polling every {POLL_INTERVAL}s | Max retries: {MAX_RETRIES} | Timeout: {AGENT_TIMEOUT}s")
     log(f"Logs: {LOGS_DIR}/")
