@@ -64,6 +64,45 @@ def log(msg):
     print(f"[{ts}] {msg}", flush=True)
 
 
+WORKER_ADDRESS = "0x862b4474b449777d2a2622F6a04b9D879D891D19"
+
+
+def get_my_active_jobs():
+    """Check on-chain for research jobs assigned to us that are IN_PROGRESS."""
+    # Get total job count from contract
+    try:
+        cmd = [CAST, "call", CONTRACT, "nextJobId()", "--rpc-url", rpc()]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            raw = result.stdout.strip()
+            next_id = int(raw, 16) if raw.startswith("0x") else int(raw)
+        else:
+            next_id = 20
+    except Exception:
+        next_id = 20
+
+    active = []
+    for job_id in range(1, min(next_id, 100)):
+        try:
+            cmd = [CAST, "call", CONTRACT, "getJob(uint256)", str(job_id), "--rpc-url", rpc()]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                continue
+            raw = result.stdout.strip()
+            h = raw[2:] if raw.startswith("0x") else raw
+            words = [h[i:i+64] for i in range(0, len(h), 64)]
+            if len(words) > 14:
+                status = int(words[7], 16)
+                worker = "0x" + words[12][24:]
+                stype = int(words[3], 16)
+                # status 1 = IN_PROGRESS, stype 7 = research
+                if status == 1 and worker.lower() == WORKER_ADDRESS.lower() and stype == 7:
+                    active.append({"id": job_id, "status": "IN_PROGRESS"})
+        except Exception:
+            continue
+    return active
+
+
 def get_ready_jobs():
     try:
         url = f"{LEFTCLAW_BASE}/api/job/ready"
@@ -87,9 +126,9 @@ def is_job_complete(job_id):
         raw = result.stdout.strip()
         h = raw[2:] if raw.startswith("0x") else raw
         words = [h[i:i+64] for i in range(0, len(h), 64)]
-        # Word 14 = status: 0=OPEN, 1=IN_PROGRESS, 2=COMPLETED, 3=DECLINED, 4=CANCELLED, 5=REASSIGNED
+        # Word 7 = status: 0=OPEN, 1=IN_PROGRESS, 2=COMPLETED, 3=DECLINED, 4=CANCELLED, 5=REASSIGNED
         if len(words) > 14:
-            status = int(words[14], 16)
+            status = int(words[7], 16)
             return status == 2
         return False
     except Exception as e:
@@ -97,13 +136,24 @@ def is_job_complete(job_id):
         return False
 
 
-def run_agent(job, attempt=1):
+def run_agent(job, attempt=1, resume=False):
     job_id = job["id"]
     client = job.get("client", "unknown")
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    log_file = os.path.join(LOGS_DIR, f"job-{job_id}-attempt{attempt}-{timestamp}.log")
+    tag = "resume" if resume else f"attempt{attempt}"
+    log_file = os.path.join(LOGS_DIR, f"job-{job_id}-{tag}-{timestamp}.log")
 
-    if attempt == 1:
+    if resume:
+        prompt = (
+            f"RESUME: Job #{job_id} on LeftClaw is already assigned to you and IN PROGRESS, "
+            f"but was not completed (previous run may have crashed or timed out). "
+            f"Do NOT call leftclaw_accept_job — the job is already accepted. "
+            f"Use leftclaw_get_job to read the full description, then leftclaw_get_messages to check for client messages. "
+            f"Then do thorough research using deep_fetch (8-10 sources max), write a comprehensive report with write_file, "
+            f"upload it with bgipfs_upload, log work with leftclaw_log_work (stage 'research'), "
+            f"wait 5 seconds, then complete the job with leftclaw_complete_job using the BGIPFS gateway URL."
+        )
+    elif attempt == 1:
         prompt = (
             f"You have a research job to complete. "
             f"Job #{job_id} on LeftClaw Services. Client: {client}. "
@@ -160,11 +210,30 @@ def main():
     log(f"Logs: {LOGS_DIR}/")
 
     while True:
-        jobs = get_ready_jobs()
+        # Priority 1: resume any IN_PROGRESS jobs assigned to us
+        active_jobs = get_my_active_jobs()
+        if active_jobs:
+            job = active_jobs[0]
+            log(f"Found IN-PROGRESS job assigned to us: #{job['id']} — resuming")
 
+            for attempt in range(1, MAX_RETRIES + 1):
+                success = run_agent(job, attempt, resume=True)
+                if success:
+                    break
+                if attempt < MAX_RETRIES:
+                    log(f"Retrying Job #{job['id']} in 10s...")
+                    time.sleep(10)
+                else:
+                    log(f"Job #{job['id']} FAILED after {MAX_RETRIES} attempts. Moving on.")
+
+            time.sleep(10)
+            continue
+
+        # Priority 2: pick up new open jobs
+        jobs = get_ready_jobs()
         if jobs:
             job = jobs[0]
-            log(f"Found research job: #{job['id']}")
+            log(f"Found new research job: #{job['id']}")
 
             for attempt in range(1, MAX_RETRIES + 1):
                 success = run_agent(job, attempt)
@@ -178,7 +247,7 @@ def main():
 
             time.sleep(10)
         else:
-            log("No research jobs. Waiting...")
+            log("No jobs (active or open). Waiting...")
             time.sleep(POLL_INTERVAL)
 
 

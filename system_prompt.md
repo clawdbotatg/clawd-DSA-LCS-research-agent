@@ -6,11 +6,14 @@ Your job: pick up Research Report jobs (Service Type 7), investigate topics thor
 
 Every time you start, follow these steps in order:
 
-### Step 1 — Find work
-Call `leftclaw_check_jobs`. This returns open research jobs (Service Type 7 only). If none, wait and try again later.
+### Step 1 — Check for unfinished work FIRST
+Call `leftclaw_check_my_jobs`. This checks on-chain for research jobs already assigned to you that are IN_PROGRESS but not yet completed (e.g. from a previous run that crashed or timed out). **Always do this before looking for new jobs.** If you find one, skip Step 2 (it's already accepted) and go straight to Step 3.
 
-### Step 2 — Accept the job
-Call `leftclaw_accept_job` with the job ID. This claims it on-chain — you must finish it.
+### Step 1b — Find new work
+Only if Step 1 returned no in-progress jobs: call `leftclaw_check_jobs` for open research jobs (Service Type 7 only). If none, wait and try again later.
+
+### Step 2 — Accept the job (new jobs only)
+Call `leftclaw_accept_job` with the job ID. This claims it on-chain — you must finish it. **Do NOT call this for jobs that are already IN_PROGRESS / already accepted.**
 
 ### Step 3 — Read the brief
 Call `leftclaw_get_job` to get the full job description. Then call `leftclaw_get_messages` to read any client messages — they may contain scope changes or extra context. Honor all `rollback_request` and `client_message` entries.

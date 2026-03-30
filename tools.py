@@ -14,6 +14,7 @@ import urllib.parse
 
 _LEFTCLAW_BASE = "https://leftclaw.services"
 _CAST = os.path.expanduser("~/.foundry/bin/cast")
+_WORKER_ADDRESS = "0x862b4474b449777d2a2622F6a04b9D879D891D19"
 
 _CONTRACT = None
 
@@ -87,6 +88,81 @@ def _run_leftclaw_check_jobs(args):
         return f"ERROR: {e}"
 
 
+def _get_next_job_id():
+    """Get the next job ID from the contract to know how many jobs exist."""
+    try:
+        cmd = [_CAST, "call", _contract(), "nextJobId()", "--rpc-url", _rpc()]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            raw = result.stdout.strip()
+            return int(raw, 16) if raw.startswith("0x") else int(raw)
+    except Exception:
+        pass
+    return 20
+
+
+def _parse_job_words(h):
+    """Parse hex-encoded getJob() return data into a dict."""
+    words = [h[i:i+64] for i in range(0, len(h), 64)]
+    if len(words) <= 14:
+        return None
+
+    status = int(words[7], 16)
+    worker = "0x" + words[12][24:]
+    stype = int(words[3], 16)
+    client = "0x" + words[2][24:]
+
+    desc = ""
+    try:
+        offset = int(words[6], 16) // 32
+        length = int(words[offset + 1], 16) if offset + 1 < len(words) else 0
+        data_start = (offset + 2) * 64
+        raw_hex = h[data_start:data_start + length * 2]
+        desc = bytes.fromhex(raw_hex).decode("utf-8", errors="replace")
+    except Exception:
+        pass
+
+    return {
+        "status": status,
+        "worker": worker,
+        "serviceTypeId": stype,
+        "client": client,
+        "description": desc,
+    }
+
+
+def _run_leftclaw_check_my_jobs(args):
+    """Check on-chain for research jobs assigned to us that are IN_PROGRESS."""
+    try:
+        next_id = _get_next_job_id()
+        active = []
+        for job_id in range(1, min(next_id, 100)):
+            try:
+                cmd = [_CAST, "call", _contract(), "getJob(uint256)", str(job_id), "--rpc-url", _rpc()]
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                if r.returncode != 0:
+                    continue
+                raw = r.stdout.strip()
+                h = raw[2:] if raw.startswith("0x") else raw
+                info = _parse_job_words(h)
+                if not info:
+                    continue
+                if (info["status"] == 1
+                        and info["worker"].lower() == _WORKER_ADDRESS.lower()
+                        and info["serviceTypeId"] == 7):
+                    active.append(
+                        f"Job #{job_id} — IN_PROGRESS — {info['description'][:200]}"
+                    )
+            except Exception:
+                continue
+
+        if active:
+            return "IN-PROGRESS research jobs assigned to you:\n" + "\n".join(active)
+        return "No in-progress research jobs assigned to you."
+    except Exception as e:
+        return f"ERROR checking active jobs: {e}"
+
+
 def _run_leftclaw_get_job(args):
     """Get full details for a specific job by reading on-chain data."""
     try:
@@ -117,7 +193,7 @@ def _run_leftclaw_get_job(args):
         client = addr(words[2])
         service_type = uint(words[3])
         price_usd = uint(words[5])
-        status_int = uint(words[14])
+        status_int = uint(words[7])
         status_map = {0: "OPEN", 1: "IN_PROGRESS", 2: "COMPLETED", 3: "DECLINED", 4: "CANCELLED", 5: "REASSIGNED"}
         worker = addr(words[12])
         created = uint(words[8])
@@ -333,10 +409,18 @@ TOOLS = [
     {
         "spec": {"type": "function", "function": {
             "name": "leftclaw_check_jobs",
-            "description": "Check LeftClaw Services for open research jobs (Service Type 7 only). Call this first to find work.",
+            "description": "Check LeftClaw Services for NEW open research jobs (Service Type 7 only). Call leftclaw_check_my_jobs FIRST to resume unfinished work, then call this only if you have no in-progress jobs.",
             "parameters": {"type": "object", "properties": {}, "required": []},
         }},
         "run": _run_leftclaw_check_jobs,
+    },
+    {
+        "spec": {"type": "function", "function": {
+            "name": "leftclaw_check_my_jobs",
+            "description": "Check on-chain for research jobs (Service Type 7) already assigned to you that are IN_PROGRESS but not yet completed. Call this FIRST before leftclaw_check_jobs — resume unfinished work before taking new jobs.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        }},
+        "run": _run_leftclaw_check_my_jobs,
     },
     {
         "spec": {"type": "function", "function": {
