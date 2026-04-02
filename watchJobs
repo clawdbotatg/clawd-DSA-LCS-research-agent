@@ -4,147 +4,17 @@ Poll LeftClaw Services for research jobs and dispatch the agent.
 No LLM involved — pure deterministic loop.
 """
 
-import json
-import os
-import subprocess
-import sys
-import time
-import urllib.request
-from datetime import datetime
+from agent.jobs import JobWatcher
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-LEFTCLAW_BASE = "https://leftclaw.services"
-CAST = os.path.expanduser("~/.foundry/bin/cast")
-POLL_INTERVAL = 60
-MAX_RETRIES = 2
-AGENT_TIMEOUT = 600
-LOGS_DIR = os.path.join(SCRIPT_DIR, "logs")
-
-os.makedirs(LOGS_DIR, exist_ok=True)
-
-CONTRACT = None
-
-def fetch_contract():
-    """Fetch the current contract address from leftclaw.services/api/services."""
-    global CONTRACT
-    try:
-        req = urllib.request.Request(
-            f"{LEFTCLAW_BASE}/api/services",
-            headers={"User-Agent": "researcher-watcher/1.0"},
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode())
-        addr = data.get("contract", "")
-        if addr and addr.startswith("0x"):
-            CONTRACT = addr
-            log(f"Contract address: {CONTRACT}")
-            return CONTRACT
-    except Exception as e:
-        log(f"ERROR fetching contract address: {e}")
-    raise RuntimeError("Could not fetch contract address from leftclaw.services/api/services")
+SERVICE_TYPE = 7
 
 
-def load_env():
-    env_file = os.path.join(SCRIPT_DIR, ".env")
-    if os.path.exists(env_file):
-        with open(env_file) as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, v = line.split("=", 1)
-                    os.environ.setdefault(k.strip(), v.strip())
-
-
-def rpc():
-    return os.environ.get("BASE_RPC_URL", "https://mainnet.base.org")
-
-
-def log(msg):
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
-
-
-WORKER_ADDRESS = "0x862b4474b449777d2a2622F6a04b9D879D891D19"
-
-
-def get_my_active_jobs():
-    """Check on-chain for research jobs assigned to us that are IN_PROGRESS."""
-    # Get total job count from contract
-    try:
-        cmd = [CAST, "call", CONTRACT, "nextJobId()", "--rpc-url", rpc()]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        if result.returncode == 0:
-            raw = result.stdout.strip()
-            next_id = int(raw, 16) if raw.startswith("0x") else int(raw)
-        else:
-            next_id = 20
-    except Exception:
-        next_id = 20
-
-    active = []
-    for job_id in range(1, min(next_id, 100)):
-        try:
-            cmd = [CAST, "call", CONTRACT, "getJob(uint256)", str(job_id), "--rpc-url", rpc()]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            if result.returncode != 0:
-                continue
-            raw = result.stdout.strip()
-            h = raw[2:] if raw.startswith("0x") else raw
-            words = [h[i:i+64] for i in range(0, len(h), 64)]
-            if len(words) > 14:
-                status = int(words[7], 16)
-                worker = "0x" + words[12][24:]
-                stype = int(words[3], 16)
-                # status 1 = IN_PROGRESS, stype 7 = research
-                if status == 1 and worker.lower() == WORKER_ADDRESS.lower() and stype == 7:
-                    active.append({"id": job_id, "status": "IN_PROGRESS"})
-        except Exception:
-            continue
-    return active
-
-
-def get_ready_jobs():
-    try:
-        url = f"{LEFTCLAW_BASE}/api/job/ready"
-        req = urllib.request.Request(url, headers={"User-Agent": "researcher-watcher/1.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode())
-        jobs = data.get("jobs", data if isinstance(data, list) else [])
-        return [j for j in jobs if str(j.get("serviceTypeId")) == "7"]
-    except Exception as e:
-        log(f"ERROR checking jobs: {e}")
-        return []
-
-
-def is_job_complete(job_id):
-    """Check on-chain if the job status is COMPLETED (status == 2)."""
-    try:
-        cmd = [CAST, "call", CONTRACT, "getJob(uint256)", str(job_id), "--rpc-url", rpc()]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        if result.returncode != 0:
-            return False
-        raw = result.stdout.strip()
-        h = raw[2:] if raw.startswith("0x") else raw
-        words = [h[i:i+64] for i in range(0, len(h), 64)]
-        # Word 7 = status: 0=OPEN, 1=IN_PROGRESS, 2=COMPLETED, 3=DECLINED, 4=CANCELLED, 5=REASSIGNED
-        if len(words) > 14:
-            status = int(words[7], 16)
-            return status == 2
-        return False
-    except Exception as e:
-        log(f"ERROR checking job status: {e}")
-        return False
-
-
-def run_agent(job, attempt=1, resume=False):
+def build_prompt(job, attempt, resume):
     job_id = job["id"]
     client = job.get("client", "unknown")
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    tag = "resume" if resume else f"attempt{attempt}"
-    log_file = os.path.join(LOGS_DIR, f"job-{job_id}-{tag}-{timestamp}.log")
 
     if resume:
-        prompt = (
+        return (
             f"RESUME: Job #{job_id} on LeftClaw is already assigned to you and IN PROGRESS, "
             f"but was not completed (previous run may have crashed or timed out). "
             f"Do NOT call leftclaw_accept_job — the job is already accepted. "
@@ -153,8 +23,9 @@ def run_agent(job, attempt=1, resume=False):
             f"upload it with bgipfs_upload, log work with leftclaw_log_work (stage 'research'), "
             f"wait 5 seconds, then complete the job with leftclaw_complete_job using the BGIPFS gateway URL."
         )
-    elif attempt == 1:
-        prompt = (
+
+    if attempt == 1:
+        return (
             f"You have a research job to complete. "
             f"Job #{job_id} on LeftClaw Services. Client: {client}. "
             f"Use leftclaw_get_job to read the full description, then leftclaw_get_messages to check for client messages. "
@@ -162,97 +33,20 @@ def run_agent(job, attempt=1, resume=False):
             f"upload it with bgipfs_upload, log work with leftclaw_log_work (stage 'research'), "
             f"wait 5 seconds, then complete the job with leftclaw_complete_job using the BGIPFS gateway URL."
         )
-    else:
-        prompt = (
-            f"RETRY: Job #{job_id} on LeftClaw was accepted but not completed on a previous attempt. "
-            f"The job is already accepted — do NOT call leftclaw_accept_job again. "
-            f"Use leftclaw_get_job to read the description, do the research (8-10 sources max), "
-            f"write the report, upload to BGIPFS, log work, wait 5 seconds, and complete the job."
-        )
 
-    log(f"Dispatching agent for Job #{job_id} (attempt {attempt}) -> {log_file}")
-
-    with open(log_file, "w") as lf:
-        lf.write(f"=== Job #{job_id} — attempt {attempt} — {timestamp} ===\n")
-        lf.write(f"Client: {client}\n---\n")
-        lf.flush()
-
-        try:
-            proc = subprocess.run(
-                [sys.executable, "run.py", prompt],
-                cwd=SCRIPT_DIR,
-                stdout=lf,
-                stderr=subprocess.STDOUT,
-                timeout=AGENT_TIMEOUT,
-            )
-            lf.write(f"\n=== Exit code: {proc.returncode} ===\n")
-        except subprocess.TimeoutExpired:
-            lf.write(f"\n=== TIMED OUT after {AGENT_TIMEOUT}s ===\n")
-            log(f"Job #{job_id} attempt {attempt} timed out")
-            return False
-
-    log(f"Job #{job_id} attempt {attempt} agent exited. Checking on-chain...")
-    time.sleep(5)
-
-    if is_job_complete(job_id):
-        log(f"Job #{job_id} COMPLETED on-chain.")
-        return True
-    else:
-        log(f"Job #{job_id} NOT complete on-chain after attempt {attempt}.")
-        return False
-
-
-def main():
-    load_env()
-    fetch_contract()
-    log("Watching for research jobs (Service Type 7)...")
-    log(f"Polling every {POLL_INTERVAL}s | Max retries: {MAX_RETRIES} | Timeout: {AGENT_TIMEOUT}s")
-    log(f"Logs: {LOGS_DIR}/")
-
-    while True:
-        # Priority 1: resume any IN_PROGRESS jobs assigned to us
-        active_jobs = get_my_active_jobs()
-        if active_jobs:
-            job = active_jobs[0]
-            log(f"Found IN-PROGRESS job assigned to us: #{job['id']} — resuming")
-
-            for attempt in range(1, MAX_RETRIES + 1):
-                success = run_agent(job, attempt, resume=True)
-                if success:
-                    break
-                if attempt < MAX_RETRIES:
-                    log(f"Retrying Job #{job['id']} in 10s...")
-                    time.sleep(10)
-                else:
-                    log(f"Job #{job['id']} FAILED after {MAX_RETRIES} attempts. Moving on.")
-
-            time.sleep(10)
-            continue
-
-        # Priority 2: pick up new open jobs
-        jobs = get_ready_jobs()
-        if jobs:
-            job = jobs[0]
-            log(f"Found new research job: #{job['id']}")
-
-            for attempt in range(1, MAX_RETRIES + 1):
-                success = run_agent(job, attempt)
-                if success:
-                    break
-                if attempt < MAX_RETRIES:
-                    log(f"Retrying Job #{job['id']} in 10s...")
-                    time.sleep(10)
-                else:
-                    log(f"Job #{job['id']} FAILED after {MAX_RETRIES} attempts. Moving on.")
-
-            time.sleep(10)
-        else:
-            log("No jobs (active or open). Waiting...")
-            time.sleep(POLL_INTERVAL)
+    return (
+        f"RETRY: Job #{job_id} on LeftClaw was accepted but not completed on a previous attempt. "
+        f"The job is already accepted — do NOT call leftclaw_accept_job again. "
+        f"Use leftclaw_get_job to read the description, do the research (8-10 sources max), "
+        f"write the report, upload to BGIPFS, log work, wait 5 seconds, and complete the job."
+    )
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        log("Stopped.")
+    JobWatcher(
+        service_type_id=SERVICE_TYPE,
+        prompt_builder=build_prompt,
+        poll_interval=60,
+        agent_timeout=600,
+        max_retries=2,
+    ).run()
